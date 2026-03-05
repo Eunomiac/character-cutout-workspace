@@ -49,7 +49,7 @@ VAMPIRIC_SATURATION = 0.9
 
 # Batch color matching
 ENABLE_COLOR_MATCHING = True
-COLOR_MATCH_REFERENCE = "first"
+COLOR_MATCH_REFERENCE = "color-references/male-vampire-5.png"
 
 # Inhuman/monster/masked: skip vampiric correction
 INHUMAN_DETECTION = "auto"
