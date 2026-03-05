@@ -50,7 +50,17 @@ INPUT_EXTENSIONS = (".png", ".tiff", ".tif")
 TARGET_HEIGHT = 3000
 
 # Draft mode: faster iteration; overrides resolution, model count, and other expensive options
-DRAFT_MODE = False
+DRAFT_MODE = True
+# Draft mode configuration (tunable when DRAFT_MODE is True)
+DRAFT_MODE_TARGET_HEIGHT = 1000 # Default: 1000
+DRAFT_MODE_UPSCALE_HEIGHT_FACTOR = 1.0 # Default: 1.0
+DRAFT_MODE_MODELS = ["birefnet-general"] # Default: ["birefnet-general"]
+DRAFT_MODE_SAM2_MODEL_SIZE = "tiny" # Default: "tiny"
+DRAFT_MODE_SKIN_DETECTION_MODE = "simple" # Default: "simple"
+DRAFT_MODE_ENABLE_ALPHA_MATTING = False # Default: False
+DRAFT_MODE_ENABLE_COLORIZATION = True # Default: False
+DRAFT_MODE_ENABLE_ALPHA_BOOST = True # Default: True
+DRAFT_MODE_ALPHA_BOOST_PASSES = 1 # Default: 1
 
 # Upscale to 1.5x target height before cutout (gives model room for removal)
 UPSCALE_HEIGHT_FACTOR = 1.5  # working height = TARGET_HEIGHT * UPSCALE_HEIGHT_FACTOR
@@ -118,20 +128,17 @@ CROP_PADDING = 5
 ENABLE_ALPHA_BOOST = True
 ALPHA_BOOST_PASSES = 4
 
-# Effective values when DRAFT_MODE overrides (faster iteration)
-_EFFECTIVE_TARGET_HEIGHT = 1000 if DRAFT_MODE else TARGET_HEIGHT
-_DRAFT_UPSCALE_FACTOR = 1.0  # No upscale in draft (skip Real-ESRGAN)
-_DRAFT_MODELS = ["birefnet-general"]  # Single fast model in draft
-_DRAFT_SAM2_SIZE = "tiny"
-WORKING_HEIGHT = int(
-    _EFFECTIVE_TARGET_HEIGHT * (_DRAFT_UPSCALE_FACTOR if DRAFT_MODE else UPSCALE_HEIGHT_FACTOR)
-)
-EFFECTIVE_MODELS = _DRAFT_MODELS if DRAFT_MODE else MODELS
-EFFECTIVE_SAM2_MODEL_SIZE = _DRAFT_SAM2_SIZE if DRAFT_MODE else SAM2_MODEL_SIZE
-EFFECTIVE_ALPHA_MATTING = False if DRAFT_MODE else ENABLE_ALPHA_MATTING
-EFFECTIVE_SKIN_DETECTION_MODE = "simple" if DRAFT_MODE else SKIN_DETECTION_MODE
-EFFECTIVE_COLORIZATION = False if DRAFT_MODE else ENABLE_COLORIZATION
-EFFECTIVE_ALPHA_BOOST_PASSES = 1 if DRAFT_MODE else ALPHA_BOOST_PASSES
+# Effective values (DRAFT_MODE uses draft config, otherwise full config)
+_EFFECTIVE_TARGET_HEIGHT = DRAFT_MODE_TARGET_HEIGHT if DRAFT_MODE else TARGET_HEIGHT
+_EFFECTIVE_UPSCALE_FACTOR = DRAFT_MODE_UPSCALE_HEIGHT_FACTOR if DRAFT_MODE else UPSCALE_HEIGHT_FACTOR
+WORKING_HEIGHT = int(_EFFECTIVE_TARGET_HEIGHT * _EFFECTIVE_UPSCALE_FACTOR)
+EFFECTIVE_MODELS = DRAFT_MODE_MODELS if DRAFT_MODE else MODELS
+EFFECTIVE_SAM2_MODEL_SIZE = DRAFT_MODE_SAM2_MODEL_SIZE if DRAFT_MODE else SAM2_MODEL_SIZE
+EFFECTIVE_ALPHA_MATTING = DRAFT_MODE_ENABLE_ALPHA_MATTING if DRAFT_MODE else ENABLE_ALPHA_MATTING
+EFFECTIVE_SKIN_DETECTION_MODE = DRAFT_MODE_SKIN_DETECTION_MODE if DRAFT_MODE else SKIN_DETECTION_MODE
+EFFECTIVE_COLORIZATION = DRAFT_MODE_ENABLE_COLORIZATION if DRAFT_MODE else ENABLE_COLORIZATION
+EFFECTIVE_ALPHA_BOOST = DRAFT_MODE_ENABLE_ALPHA_BOOST if DRAFT_MODE else ENABLE_ALPHA_BOOST
+EFFECTIVE_ALPHA_BOOST_PASSES = DRAFT_MODE_ALPHA_BOOST_PASSES if DRAFT_MODE else ALPHA_BOOST_PASSES
 
 # Diagnostics: log which step each image is on (helps identify if stuck on upscale vs segment)
 ENABLE_STEP_LOGGING = True
@@ -440,32 +447,51 @@ def colorize_if_needed(img: PILImage) -> PILImage:
 def degrade_image(img: PILImage) -> PILImage:
     """
     Neutralize color grading (sepia, blue cast, etc.) via white balance and optional exposure correction.
-    Affects entire image. Returns new image; does not modify original.
+    Applies only to foreground pixels (alpha > threshold); transparent background is excluded
+    so it does not skew the correction. Returns new image; does not modify original.
     """
-    import cv2
     from skimage.exposure import adjust_gamma
 
     arr = np.array(img)
     if arr.ndim != 3 or arr.shape[2] < 3:
         return img
-    rgb = arr[:, :, :3].copy()
-    alpha = arr[:, :, 3:4].copy() if arr.shape[2] == 4 else None
-    # OpenCV expects BGR
-    bgr = rgb[:, :, ::-1]
+    rgb = arr[:, :, :3].astype(np.float64)
+    alpha = arr[:, :, 3:4] if arr.shape[2] == 4 else np.ones((arr.shape[0], arr.shape[1], 1), dtype=np.uint8) * 255
+    alpha_flat = alpha[:, :, 0] if alpha.ndim == 3 else alpha
+    fg = (alpha_flat.astype(np.float64) / 255.0) > 0.01
+    if not np.any(fg):
+        return img
     # Brighten very dark images before white balance (e.g. heavily blue-shifted dark photos)
-    mean_lum = float(np.mean(0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]))
-    if mean_lum < DE_GRADING_DARK_THRESHOLD and DE_GRADING_EXPOSURE_GAMMA < 1.0:
-        bgr_float = bgr.astype(np.float64) / 255.0
-        bgr_float = adjust_gamma(bgr_float, DE_GRADING_EXPOSURE_GAMMA)
-        bgr = (np.clip(bgr_float, 0, 1) * 255).astype(np.uint8)
-    wb = cv2.xphoto.createGrayworldWB()
-    result_bgr = wb.balanceWhite(bgr)
-    result_rgb = result_bgr[:, :, ::-1]
-    if alpha is not None:
+    mean_lum_fg = float(np.mean(0.299 * rgb[:, :, 0][fg] + 0.587 * rgb[:, :, 1][fg] + 0.114 * rgb[:, :, 2][fg]))
+    if mean_lum_fg < DE_GRADING_DARK_THRESHOLD and DE_GRADING_EXPOSURE_GAMMA < 1.0:
+        rgb_norm = rgb / 255.0
+        rgb_norm = adjust_gamma(rgb_norm, DE_GRADING_EXPOSURE_GAMMA)
+        rgb = rgb_norm * 255.0
+    # Gray-world white balance: scale channels so foreground mean is neutral gray
+    r_fg, g_fg, b_fg = rgb[:, :, 0][fg], rgb[:, :, 1][fg], rgb[:, :, 2][fg]
+    mean_r = float(np.mean(r_fg))
+    mean_g = float(np.mean(g_fg))
+    mean_b = float(np.mean(b_fg))
+    if mean_r < 1e-6:
+        mean_r = 1e-6
+    if mean_g < 1e-6:
+        mean_g = 1e-6
+    if mean_b < 1e-6:
+        mean_b = 1e-6
+    target = 128.0
+    kr, kg, kb = target / mean_r, target / mean_g, target / mean_b
+    result_rgb = rgb.copy()
+    result_rgb[:, :, 0] = np.clip(rgb[:, :, 0] * kr, 0, 255)
+    result_rgb[:, :, 1] = np.clip(rgb[:, :, 1] * kg, 0, 255)
+    result_rgb[:, :, 2] = np.clip(rgb[:, :, 2] * kb, 0, 255)
+    result_rgb = result_rgb.astype(np.uint8)
+    fg_3d = np.broadcast_to(fg[:, :, np.newaxis], result_rgb.shape)
+    result_rgb = np.where(fg_3d, result_rgb, arr[:, :, :3])
+    if arr.shape[2] == 4:
         result = np.dstack([result_rgb, alpha])
     else:
         result = result_rgb
-    return Image.fromarray(result)
+    return Image.fromarray(result.astype(np.uint8))
 
 
 def upscale_image(img: PILImage, target_height: int) -> PILImage:
@@ -841,7 +867,7 @@ def process_image(
     composite = Image.new("RGBA", img.size, (0, 0, 0, 0))
     composite.paste(img, (0, 0))
     composite.putalpha(mask)
-    if ENABLE_ALPHA_BOOST:
+    if EFFECTIVE_ALPHA_BOOST:
         composite = alpha_boost(composite)
     scale = _EFFECTIVE_TARGET_HEIGHT / composite.height
     composite = composite.resize(
