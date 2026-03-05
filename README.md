@@ -91,7 +91,7 @@ Edit the config block at the top of `process_cutouts.py`:
 | `DRAFT_MODE` | `False` | Fast iteration: 1000px target, 1 model, no upscale, no alpha matting, no colorization |
 | `UPSCALE_HEIGHT_FACTOR` | `1.5` | Upscale to 1.5× target height before cutout for better masks |
 
-**DRAFT_MODE overrides:** Target 1000px, working 1000px (no upscale), single model (`birefnet-general`), SAM 2 `tiny`, alpha matting off, skin detection `simple` (YCbCr), colorization off, alpha boost 1 pass.
+**DRAFT_MODE overrides (tunable):** `DRAFT_MODE_TARGET_HEIGHT`, `DRAFT_MODE_UPSCALE_HEIGHT_FACTOR`, `DRAFT_MODE_MODELS`, `DRAFT_MODE_SAM2_MODEL_SIZE`, `DRAFT_MODE_SKIN_DETECTION_MODE`, `DRAFT_MODE_ENABLE_ALPHA_MATTING`, `DRAFT_MODE_ENABLE_COLORIZATION`, `DRAFT_MODE_ENABLE_ALPHA_BOOST`, `DRAFT_MODE_ALPHA_BOOST_PASSES`.
 
 ### Exposure (Segmentation Only)
 
@@ -134,7 +134,7 @@ Edit the config block at the top of `process_cutouts.py`:
 
 | Parameter | Default | Description |
 | ----------- | ----------- | ----------- |
-| `ENABLE_DE_GRADING` | `True` | Neutralize color grading (sepia, blue cast) via white balance |
+| `ENABLE_DE_GRADING` | `True` | Neutralize color grading (sepia, blue cast) via white balance; foreground only |
 | `DE_GRADING_DARK_THRESHOLD` | `60` | Mean luminance below this: apply exposure correction |
 | `DE_GRADING_EXPOSURE_GAMMA` | `0.75` | Gamma for very dark images (&lt; 1 brightens) |
 
