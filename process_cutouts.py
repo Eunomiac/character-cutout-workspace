@@ -39,6 +39,57 @@ from PIL import Image
 from tqdm import tqdm
 from PIL.Image import Image as PILImage
 
+# === PHASE LOGGING (prefixes console output by processing phase) ===
+_phase_tag: str = ""
+
+
+def _set_phase(tag: str) -> None:
+    """Set the current phase tag for log prefix. Empty string = no prefix."""
+    global _phase_tag
+    _phase_tag = tag
+
+
+def _log_phase(msg: str) -> None:
+    """
+    Print message with current phase prefix. Writes to sys.stderr so output is
+    consistent with tqdm; PhasePrefixStream adds the prefix when stderr is wrapped.
+    """
+    sys.stderr.write(msg + "\n")
+    sys.stderr.flush()
+
+
+class _PhasePrefixStream:
+    """
+    Wraps a text stream and prefixes each line with the current phase tag.
+    Used so tqdm progress bars and library output (e.g. HF downloads) show [PhaseTag].
+    """
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._buffer = ""
+
+    def write(self, data: str | bytes) -> int:
+        if isinstance(data, bytes):
+            data = data.decode("utf-8", errors="replace")
+        tag = f"[{_phase_tag}] " if _phase_tag else ""
+        if data.startswith("\r"):
+            out = "\r" + tag + data[1:]
+        elif tag:
+            lines = data.split("\n")
+            if lines and lines[-1] == "":
+                lines = lines[:-1]
+            out = tag + ("\n" + tag).join(lines) + ("\n" if data.endswith("\n") else "")
+        else:
+            out = data
+        return self._stream.write(out)
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+
 # === CONFIGURATION (edit these) ===
 # Environment: CUDA available. Model-size options default to largest/best for quality.
 INPUT_FOLDER = "input"
@@ -56,11 +107,11 @@ DRAFT_MODE_TARGET_HEIGHT = 1000 # Default: 1000
 DRAFT_MODE_UPSCALE_HEIGHT_FACTOR = 1.0 # Default: 1.0
 DRAFT_MODE_MODELS = ["birefnet-general"] # Default: ["birefnet-general"]
 DRAFT_MODE_SAM2_MODEL_SIZE = "tiny" # Default: "tiny"
-DRAFT_MODE_SKIN_DETECTION_MODE = "simple" # Default: "simple"
+DRAFT_MODE_SKIN_DETECTION_MODE = "precise" # Default: "simple"
 DRAFT_MODE_ENABLE_ALPHA_MATTING = False # Default: False
 DRAFT_MODE_ENABLE_COLORIZATION = True # Default: False
 DRAFT_MODE_ENABLE_ALPHA_BOOST = True # Default: True
-DRAFT_MODE_ALPHA_BOOST_PASSES = 1 # Default: 1
+DRAFT_MODE_ALPHA_BOOST_PASSES = 2 # Default: 1
 
 # Upscale to 1.5x target height before cutout (gives model room for removal)
 UPSCALE_HEIGHT_FACTOR = 1.5  # working height = TARGET_HEIGHT * UPSCALE_HEIGHT_FACTOR
@@ -85,8 +136,9 @@ VAMPIRIC_SATURATION = 0.9
 
 # De-grading: neutralize color grading (sepia, blue cast) before color matching / vampiric
 ENABLE_DE_GRADING = True
-DE_GRADING_DARK_THRESHOLD = 60  # Mean luminance below this: apply exposure correction
-DE_GRADING_EXPOSURE_GAMMA = 0.75  # < 1 brightens; applied only when image is very dark
+DE_GRADING_DARK_THRESHOLD = 45  # Mean luminance below this: apply exposure correction (was 60; lower = less aggressive; cutouts with dark clothing often have low mean)
+DE_GRADING_EXPOSURE_GAMMA = 0.85  # < 1 brightens; applied only when very dark (0.75 was aggressive; 0.95 = subtle)
+DE_GRADING_SCALE_CAP = 1.4  # Cap gray-world scale factors to prevent blown highlights (1.5 = moderate, 1.3 = conservative, 2.0 = original/unbounded)
 
 # Optional colorization for near-grayscale images (Phase 0b)
 ENABLE_COLORIZATION = True
@@ -181,7 +233,8 @@ def _get_mean_saturation_rgb(rgb: np.ndarray, alpha: Optional[np.ndarray] = None
     hsv = rgb2hsv(rgb.astype(np.float64) / 255.0)
     sat = hsv[:, :, 1]
     if alpha is not None:
-        mask = (alpha.astype(np.float64) / 255.0) > 0.1
+        alpha_flat = alpha.squeeze()
+        mask = (alpha_flat.astype(np.float64) / 255.0) > 0.1
         if not np.any(mask):
             return 0.0
         return float(np.mean(sat[mask]))
@@ -280,6 +333,7 @@ def _colorize_via_inference_client(
 def _load_image_from_path_or_url(path_or_url: str) -> PILImage:
     """
     Load RGB image from local path or URL. Handles Gradio returning either.
+    Ensures result has 3 channels (some backends may return grayscale).
     """
     s = str(path_or_url).strip()
     if s.startswith(("http://", "https://")):
@@ -289,13 +343,19 @@ def _load_image_from_path_or_url(path_or_url: str) -> PILImage:
         os.close(fd)
         try:
             urllib.request.urlretrieve(s, tmp)
-            return Image.open(tmp).convert("RGB")
+            img = Image.open(tmp).convert("RGB")
         finally:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
-    return Image.open(s).convert("RGB")
+    else:
+        img = Image.open(s).convert("RGB")
+    arr = np.array(img)
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
+        img = Image.fromarray(arr.astype(np.uint8))
+    return img
 
 
 def _colorize_via_gradio_space(
@@ -426,9 +486,11 @@ def colorize_if_needed(img: PILImage) -> PILImage:
                 tmp_path, render_factor=35, post_process=True, watermarked=False
             )
             result_arr = np.array(result.convert("RGB"))
+            if result_arr.ndim == 2:
+                result_arr = np.stack([result_arr, result_arr, result_arr], axis=-1)
             if alpha is not None:
                 result_arr = np.dstack([result_arr, alpha])
-            return Image.fromarray(result_arr)
+            return Image.fromarray(result_arr.astype(np.uint8))
         except Exception:
             return img
         finally:
@@ -440,7 +502,13 @@ def colorize_if_needed(img: PILImage) -> PILImage:
     if COLORIZATION_BACKEND in ("hf_inference", "hf_space"):
         img_rgb = Image.fromarray(rgb)
         result, success = _colorize_via_api(img_rgb, alpha)
-        return result if success else img
+        if success:
+            result_arr = np.array(result)
+            if result_arr.ndim == 2:
+                rgb_expanded = np.stack([result_arr, result_arr, result_arr], axis=-1)
+                result_arr = np.dstack([rgb_expanded, alpha]) if alpha is not None else rgb_expanded
+            return Image.fromarray(result_arr.astype(np.uint8))
+        return img
     return img
 
 
@@ -453,6 +521,8 @@ def degrade_image(img: PILImage) -> PILImage:
     from skimage.exposure import adjust_gamma
 
     arr = np.array(img)
+    if arr.ndim == 2:
+        arr = np.stack([arr, arr, arr], axis=-1)
     if arr.ndim != 3 or arr.shape[2] < 3:
         return img
     rgb = arr[:, :, :3].astype(np.float64)
@@ -479,7 +549,12 @@ def degrade_image(img: PILImage) -> PILImage:
     if mean_b < 1e-6:
         mean_b = 1e-6
     target = 128.0
-    kr, kg, kb = target / mean_r, target / mean_g, target / mean_b
+    kr = min(target / mean_r, DE_GRADING_SCALE_CAP)
+    kg = min(target / mean_g, DE_GRADING_SCALE_CAP)
+    kb = min(target / mean_b, DE_GRADING_SCALE_CAP)
+    kr = max(kr, 1.0 / DE_GRADING_SCALE_CAP)
+    kg = max(kg, 1.0 / DE_GRADING_SCALE_CAP)
+    kb = max(kb, 1.0 / DE_GRADING_SCALE_CAP)
     result_rgb = rgb.copy()
     result_rgb[:, :, 0] = np.clip(rgb[:, :, 0] * kr, 0, 255)
     result_rgb[:, :, 1] = np.clip(rgb[:, :, 1] * kg, 0, 255)
@@ -893,25 +968,27 @@ def _print_gpu_status() -> None:
         cuda_ok = torch.cuda.is_available()
         if cuda_ok:
             dev = torch.cuda.get_device_name(0)
-            print(f"  CUDA: available ({dev})")
+            _log_phase(f"  CUDA: available ({dev})")
         else:
-            print("  CUDA: not available - expect slow CPU processing")
+            _log_phase("  CUDA: not available - expect slow CPU processing")
     except ImportError:
-        print("  CUDA: torch not loaded yet")
+        _log_phase("  CUDA: torch not loaded yet")
     try:
         import onnxruntime as ort
 
         provs = ort.get_available_providers()
         if "CUDAExecutionProvider" in provs:
-            print("  ONNX Runtime: CUDA provider available")
+            _log_phase("  ONNX Runtime: CUDA provider available")
         else:
-            print("  ONNX Runtime: CUDA provider not available - rembg will use CPU")
+            _log_phase("  ONNX Runtime: CUDA provider not available - rembg will use CPU")
     except ImportError:
-        print("  ONNX Runtime: not checked (rembg uses its own)")
+        _log_phase("  ONNX Runtime: not checked (rembg uses its own)")
 
 
 def main() -> None:
     """Scan input, process all images through all models, run post-passes."""
+    sys.stderr = _PhasePrefixStream(sys.stderr)  # type: ignore[assignment]
+
     base_dir = Path(__file__).resolve().parent
     input_dir = base_dir / INPUT_FOLDER
     input_dir.mkdir(exist_ok=True)
@@ -924,11 +1001,12 @@ def main() -> None:
         if p.is_file() and p.suffix.lower() in INPUT_EXTENSIONS
     ]
     if not paths:
-        print(f"No images found in {input_dir}. Add .png or .tiff files.")
+        _log_phase(f"No images found in {input_dir}. Add .png or .tiff files.")
         return
-    print(f"Found {len(paths)} images. Loading models...")
+    _set_phase("Load")
+    _log_phase(f"Found {len(paths)} images. Loading models...")
     if DRAFT_MODE:
-        print(f"  DRAFT_MODE: target={_EFFECTIVE_TARGET_HEIGHT}px, working={WORKING_HEIGHT}px, models={EFFECTIVE_MODELS}")
+        _log_phase(f"  DRAFT_MODE: target={_EFFECTIVE_TARGET_HEIGHT}px, working={WORKING_HEIGHT}px, models={EFFECTIVE_MODELS}")
     _print_gpu_status()
     sessions: dict[str, Any] = {}
     for m in EFFECTIVE_MODELS:
@@ -937,11 +1015,11 @@ def main() -> None:
                 from sam2.sam2_image_predictor import SAM2ImagePredictor
 
                 hf_id = SAM2_HF_IDS.get(EFFECTIVE_SAM2_MODEL_SIZE, SAM2_HF_IDS["large"])
-                print(f"  Loading SAM 2 ({EFFECTIVE_SAM2_MODEL_SIZE})...")
+                _log_phase(f"  Loading SAM 2 ({EFFECTIVE_SAM2_MODEL_SIZE})...")
                 predictor = SAM2ImagePredictor.from_pretrained(hf_id)
                 sessions["sam2_predictor"] = predictor
             except Exception as e:
-                print(f"  Failed to load SAM 2: {e}")
+                _log_phase(f"  Failed to load SAM 2: {e}")
                 sessions["sam2_predictor"] = None
         else:
             from rembg import new_session
@@ -953,7 +1031,8 @@ def main() -> None:
     for model_name in EFFECTIVE_MODELS:
         if model_name == "sam2" and sessions.get("sam2_predictor") is None:
             continue
-        print(f"\nProcessing with {model_name}...")
+        _set_phase("Segment")
+        _log_phase(f"\nProcessing with {model_name}...")
         for img_path in tqdm(paths, desc=model_name, unit="img"):
             process_image(img_path, model_name, sessions, base_dir)
     if EFFECTIVE_COLORIZATION or ENABLE_DE_GRADING:
@@ -963,8 +1042,9 @@ def main() -> None:
                 continue
             outputs = [p for p in out_dir.iterdir() if p.suffix.lower() in (".png", ".tiff", ".tif")]
             if outputs:
+                _set_phase("Colorize")
                 label = "Colorize + De-grade" if (EFFECTIVE_COLORIZATION and ENABLE_DE_GRADING) else ("Colorize" if EFFECTIVE_COLORIZATION else "De-grading")
-                print(f"\n{label} {model_name}...")
+                _log_phase(f"\n{label} {model_name}...")
                 for out_path in tqdm(outputs, desc=model_name, unit="img"):
                     try:
                         img = Image.open(out_path).convert("RGBA")
@@ -974,7 +1054,7 @@ def main() -> None:
                             img = degrade_image(img)
                         img.save(out_path)
                     except Exception as e:
-                        print(f"    Failed {out_path.name}: {e}")
+                        _log_phase(f"    Failed {out_path.name}: {e}")
     if ENABLE_VAMPIRIC_CORRECTION:
         for model_name in EFFECTIVE_MODELS:
             out_dir = base_dir / OUTPUT_BASE / model_name
@@ -982,7 +1062,8 @@ def main() -> None:
                 continue
             outputs = [p for p in out_dir.iterdir() if p.suffix.lower() in (".png", ".tiff", ".tif")]
             if outputs:
-                print(f"\nVampiric correction {model_name}...")
+                _set_phase("VampCorrection")
+                _log_phase(f"\nVampiric correction {model_name}...")
                 for out_path in tqdm(outputs, desc=model_name, unit="img"):
                     img = Image.open(out_path).convert("RGBA")
                     if should_skip_vampiric(img, out_path.name):
@@ -993,7 +1074,8 @@ def main() -> None:
                         base_dir=base_dir,
                     )
                     result.save(out_path)
-    print("\nDone.")
+    _set_phase("")
+    _log_phase("\nDone.")
 
 
 if __name__ == "__main__":

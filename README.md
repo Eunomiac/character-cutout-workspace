@@ -135,8 +135,9 @@ Edit the config block at the top of `process_cutouts.py`:
 | Parameter | Default | Description |
 | ----------- | ----------- | ----------- |
 | `ENABLE_DE_GRADING` | `True` | Neutralize color grading (sepia, blue cast) via white balance; foreground only |
-| `DE_GRADING_DARK_THRESHOLD` | `60` | Mean luminance below this: apply exposure correction |
-| `DE_GRADING_EXPOSURE_GAMMA` | `0.75` | Gamma for very dark images (&lt; 1 brightens) |
+| `DE_GRADING_DARK_THRESHOLD` | `45` | Mean luminance below this: apply exposure pre-brightening (lower = less aggressive; cutouts with dark clothing often have low mean) |
+| `DE_GRADING_EXPOSURE_GAMMA` | `0.85` | Gamma for very dark images (&lt; 1 brightens; 0.95 = subtle) |
+| `DE_GRADING_SCALE_CAP` | `1.4` | Cap gray-world scale factors to prevent blown highlights (1.3 = conservative, 2.0 = unbounded) |
 
 ### Optional Colorization
 
@@ -179,6 +180,13 @@ Edit the config block at the top of `process_cutouts.py`:
 | `INHUMAN_DETECTION` | `"auto"` | `"auto"` \| `"suffix"` \| `"none"` — when to skip vampiric correction |
 | `INHUMAN_SKIN_THRESHOLD` | `0.08` | (auto) Skip if skin &lt; 8% of foreground |
 | `INHUMAN_FILENAME_SUFFIX` | `"-inhuman"` | (suffix) Skip if filename contains this, e.g. `npc_orc-inhuman.png` |
+
+## Troubleshooting
+
+**Blown-out highlights / overexposed skin or clothing:**
+- The exposure gamma (`EXPOSURE_GAMMA`) is applied **only to the segmentation input** — the final cutout uses the original image, so it is not the cause of overexposure.
+- Overexposure usually comes from **de-grading**: gray-world white balance can push channels past 255. Try lowering `DE_GRADING_SCALE_CAP` (e.g. 1.3 or 1.2). Raise `DE_GRADING_DARK_THRESHOLD` if you suspect pre-brightening is too aggressive on cutouts with dark clothing.
+- If results are still too bright, consider disabling de-grading (`ENABLE_DE_GRADING = False`) or colorization (`ENABLE_COLORIZATION = False`) to narrow down the cause.
 
 ## Color Reference Tips
 
