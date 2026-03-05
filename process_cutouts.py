@@ -442,7 +442,6 @@ def _get_colorizer() -> Any:
         return _colorizer_instance
     try:
         from deoldify.visualize import get_image_colorizer  # pyright: ignore[reportMissingImports]
-        from deoldify.visualize import get_image_colorizer  # pyright: ignore[reportMissingImports]
 
         (_MODEL_CACHE / "deoldify").mkdir(parents=True, exist_ok=True)
         _colorizer_instance = get_image_colorizer(
@@ -671,7 +670,6 @@ def alpha_boost(img: PILImage) -> PILImage:
 
 def smart_crop(img: PILImage) -> PILImage:
     """Crop to content bounds (alpha >= threshold), add padding, re-scale to target height."""
-    """Crop to content bounds (alpha >= threshold), add padding, re-scale to target height."""
     arr = np.array(img)
     if arr.ndim != 3 or arr.shape[2] < 4:
         return img
@@ -692,9 +690,7 @@ def smart_crop(img: PILImage) -> PILImage:
     cropped = arr[rmin:rmax, cmin:cmax]
     pil_crop = Image.fromarray(cropped)
     scale = _EFFECTIVE_TARGET_HEIGHT / pil_crop.height
-    scale = _EFFECTIVE_TARGET_HEIGHT / pil_crop.height
     new_w = int(pil_crop.width * scale)
-    return pil_crop.resize((new_w, _EFFECTIVE_TARGET_HEIGHT), Image.Resampling.LANCZOS)
     return pil_crop.resize((new_w, _EFFECTIVE_TARGET_HEIGHT), Image.Resampling.LANCZOS)
 
 
@@ -936,7 +932,6 @@ def process_image(
         img = Image.open(img_path).convert("RGB")
     except Exception as e:
         tqdm.write(f"  Error loading {img_path}: {e}")
-        tqdm.write(f"  Error loading {img_path}: {e}")
         return None
     orig_size = img.size
     working_h = WORKING_HEIGHT
@@ -945,10 +940,8 @@ def process_image(
         img = img.resize((int(img.width * scale), working_h), Image.Resampling.LANCZOS)
     elif img.height < working_h:
         _log_step(f"    Upscaling {img_path.name} ({img.height} -> {working_h}px)...")
-        _log_step(f"    Upscaling {img_path.name} ({img.height} -> {working_h}px)...")
         img = upscale_image(img, working_h)
     seg_input = adjust_exposure(img, EXPOSURE_GAMMA) if ENABLE_EXPOSURE_ADJUST else img
-    _log_step(f"    Segmenting {img_path.name} with {model_name}...")
     _log_step(f"    Segmenting {img_path.name} with {model_name}...")
     mask = generate_mask(seg_input, model_name, sessions)
     mask = mask.resize(img.size, Image.Resampling.LANCZOS)
@@ -958,9 +951,7 @@ def process_image(
     if EFFECTIVE_ALPHA_BOOST:
         composite = alpha_boost(composite)
     scale = _EFFECTIVE_TARGET_HEIGHT / composite.height
-    scale = _EFFECTIVE_TARGET_HEIGHT / composite.height
     composite = composite.resize(
-        (int(composite.width * scale), _EFFECTIVE_TARGET_HEIGHT),
         (int(composite.width * scale), _EFFECTIVE_TARGET_HEIGHT),
         Image.Resampling.LANCZOS,
     )
