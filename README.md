@@ -88,6 +88,7 @@ Edit the config block at the top of `process_cutouts.py`:
 | Parameter | Default | Description |
 | ----------- | ----------- | ----------- |
 | `TARGET_HEIGHT` | `3000` | Output height in pixels (width scales proportionally) |
+| `DRAFT_MODE` | `False` | Fast iteration: target 1000px, working 1500px |
 | `UPSCALE_HEIGHT_FACTOR` | `1.5` | Upscale to 1.5× target height before cutout for better masks |
 
 ### Exposure (Segmentation Only)
