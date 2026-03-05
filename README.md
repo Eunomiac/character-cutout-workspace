@@ -12,7 +12,7 @@ A command-line Python workflow for producing **Vampire: the Masquerade** NPC cha
 - **Alpha boost** — Fixes semi-transparent “see-through” patches
 - **Smart crop** — Trims ghost particles at edges, re-scales to target height
 - **De-grading** — Neutralize color grading (sepia, blue cast) via white balance; clothing left neutrally lit
-- **Optional colorization** — DeOldify for near-grayscale images (when enabled)
+- **Optional colorization** — HF Inference API, HF Space (DeOldify), or local DeOldify for near-grayscale images
 - **Vampiric skin correction** — Skin-only adjustment toward reference look; reference influences skin only, not clothing
 
 ## Requirements
@@ -88,8 +88,10 @@ Edit the config block at the top of `process_cutouts.py`:
 | Parameter | Default | Description |
 | ----------- | ----------- | ----------- |
 | `TARGET_HEIGHT` | `3000` | Output height in pixels (width scales proportionally) |
-| `DRAFT_MODE` | `False` | Fast iteration: target 1000px, working 1500px |
+| `DRAFT_MODE` | `False` | Fast iteration: 1000px target, 1 model, no upscale, no alpha matting, no colorization |
 | `UPSCALE_HEIGHT_FACTOR` | `1.5` | Upscale to 1.5× target height before cutout for better masks |
+
+**DRAFT_MODE overrides:** Target 1000px, working 1000px (no upscale), single model (`birefnet-general`), SAM 2 `tiny`, alpha matting off, skin detection `simple` (YCbCr), colorization off, alpha boost 1 pass.
 
 ### Exposure (Segmentation Only)
 
@@ -140,8 +142,19 @@ Edit the config block at the top of `process_cutouts.py`:
 
 | Parameter | Default | Description |
 | ----------- | ----------- | ----------- |
-| `ENABLE_COLORIZATION` | `False` | AI colorize near-grayscale images (requires DeOldify) |
+| `ENABLE_COLORIZATION` | `True` | AI colorize near-grayscale images |
 | `COLORIZATION_SATURATION_THRESHOLD` | `0.05` | Mean saturation below this triggers colorization |
+| `COLORIZATION_BACKEND` | `"hf_space"` | `"hf_space"` \| `"hf_inference"` \| `"deoldify"` \| `"none"` |
+| `COLORIZATION_HF_SPACE` | `"leonelhs/deoldify"` | Hugging Face Space (verified API) for Gradio-based colorization |
+| `COLORIZATION_HF_MODEL` | `None` | **Required for hf_inference.** Example: `rsortino/ColorizeNet` |
+| `COLORIZATION_MAX_SIZE` | `1024` | Max dimension sent to API (images downscaled) |
+| `COLORIZATION_HF_TOKEN` | `None` | HF token; uses `HF_TOKEN` or `HF_HUB_TOKEN` env if unset |
+
+**Backends:** `hf_space` (leonelhs/deoldify) works without a token for public Spaces. `hf_inference` requires a token and `COLORIZATION_HF_MODEL` set to a diffusion colorization model (e.g. `rsortino/ColorizeNet`).
+
+**Token (only for hf_inference or private Spaces):** Create one at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens). Free account, then *New token* → choose *Read* or *Write*. Set `HF_TOKEN` or `HF_HUB_TOKEN` in your environment, or run `huggingface-cli login`. For `hf_space` with leonelhs/deoldify (public), no token needed.
+
+**Performance:** API colorization adds ~10–40 s per image (network + inference). First Space request may incur 30–120 s cold start. Local DeOldify is faster (~5–15 s) but has heavy dependencies.
 
 ### Skin Detection
 
