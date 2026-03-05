@@ -11,11 +11,26 @@ weights/
 *.onnx.gz
 
 # Output (generated cutouts)
-output/
+output/*
+!output/.gitkeep
+!output/birefnet-general/
+output/birefnet-general/*
+!output/birefnet-general/.gitkeep
+!output/birefnet-portrait/
+output/birefnet-portrait/*
+!output/birefnet-portrait/.gitkeep
+!output/bria-rmbg/
+output/bria-rmbg/*
+!output/bria-rmbg/.gitkeep
+!output/sam2/
+output/sam2/*
+!output/sam2/.gitkeep
 
-# Input images (user-provided; keep folder via .gitkeep)
+# Input & color-reference images (user-provided; keep folder via .gitkeep)
 input/*
 !input/.gitkeep
+color-references/*
+!color-references/.gitkeep
 
 # Python
 __pycache__/
