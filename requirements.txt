@@ -1,0 +1,18 @@
+# Character Cutout Workspace - Dependencies
+# Install: pip install -r requirements.txt
+# Note: SAM-2 requires torch>=2.5.1; install PyTorch with CUDA first if needed:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+# Background removal (GPU variant for CUDA)
+rembg[gpu]>=2.0.72
+
+# Image upscaling
+realesrgan>=0.3.0
+
+# Image processing
+scikit-image>=0.22.0
+numpy>=1.24.4
+Pillow>=9.4.0
+
+# SAM 2 - install from GitHub (requires torch>=2.5.1)
+SAM-2 @ git+https://github.com/facebookresearch/sam2.git
