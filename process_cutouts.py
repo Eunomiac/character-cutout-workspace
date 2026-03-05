@@ -49,6 +49,9 @@ INPUT_EXTENSIONS = (".png", ".tiff", ".tif")
 # Target height for all final cutouts (width scales proportionally)
 TARGET_HEIGHT = 3000
 
+# Draft mode: lower resolution for faster iteration (target 1000px, working 1500px)
+DRAFT_MODE = True
+
 # Upscale to 1.5x target height before cutout (gives model room for removal)
 UPSCALE_HEIGHT_FACTOR = 1.5  # working height = TARGET_HEIGHT * UPSCALE_HEIGHT_FACTOR
 
@@ -99,8 +102,12 @@ CROP_PADDING = 5
 ENABLE_ALPHA_BOOST = True
 ALPHA_BOOST_PASSES = 4
 
-# Working height before cutout (1.5x target)
-WORKING_HEIGHT = int(TARGET_HEIGHT * UPSCALE_HEIGHT_FACTOR)
+# Effective target and working height (draft mode overrides to 1000 / 1500)
+_EFFECTIVE_TARGET_HEIGHT = 1000 if DRAFT_MODE else TARGET_HEIGHT
+WORKING_HEIGHT = int(_EFFECTIVE_TARGET_HEIGHT * UPSCALE_HEIGHT_FACTOR)
+
+# Diagnostics: log which step each image is on (helps identify if stuck on upscale vs segment)
+ENABLE_STEP_LOGGING = True
 
 # SAM 2 HuggingFace model IDs by size
 SAM2_HF_IDS: dict[str, str] = {
@@ -156,7 +163,7 @@ def _get_colorizer() -> Any:
     if _colorizer_instance is not None:
         return _colorizer_instance
     try:
-        from deoldify.visualize import get_image_colorizer
+        from deoldify.visualize import get_image_colorizer  # pyright: ignore[reportMissingImports]
 
         (_MODEL_CACHE / "deoldify").mkdir(parents=True, exist_ok=True)
         _colorizer_instance = get_image_colorizer(
@@ -342,7 +349,7 @@ def alpha_boost(img: PILImage) -> PILImage:
 
 
 def smart_crop(img: PILImage) -> PILImage:
-    """Crop to content bounds (alpha >= threshold), add padding, re-scale to TARGET_HEIGHT."""
+    """Crop to content bounds (alpha >= threshold), add padding, re-scale to target height."""
     arr = np.array(img)
     if arr.ndim != 3 or arr.shape[2] < 4:
         return img
@@ -362,9 +369,9 @@ def smart_crop(img: PILImage) -> PILImage:
     cmax = min(arr.shape[1], cmax + pad + 1)
     cropped = arr[rmin:rmax, cmin:cmax]
     pil_crop = Image.fromarray(cropped)
-    scale = TARGET_HEIGHT / pil_crop.height
+    scale = _EFFECTIVE_TARGET_HEIGHT / pil_crop.height
     new_w = int(pil_crop.width * scale)
-    return pil_crop.resize((new_w, TARGET_HEIGHT), Image.Resampling.LANCZOS)
+    return pil_crop.resize((new_w, _EFFECTIVE_TARGET_HEIGHT), Image.Resampling.LANCZOS)
 
 
 def should_skip_vampiric(img: PILImage, filename: str) -> bool:
@@ -582,6 +589,12 @@ def _get_reference_skin_lab_stats(reference_path: str | Path, base_dir: Path) ->
     return ref_mean, ref_std
 
 
+def _log_step(msg: str) -> None:
+    """Print step message; works alongside tqdm without breaking progress bar."""
+    if ENABLE_STEP_LOGGING:
+        tqdm.write(msg)
+
+
 def process_image(
     img_path: Path,
     model_name: str,
@@ -592,7 +605,7 @@ def process_image(
     try:
         img = Image.open(img_path).convert("RGB")
     except Exception as e:
-        print(f"  Error loading {img_path}: {e}")
+        tqdm.write(f"  Error loading {img_path}: {e}")
         return None
     orig_size = img.size
     working_h = WORKING_HEIGHT
@@ -600,8 +613,10 @@ def process_image(
         scale = working_h / img.height
         img = img.resize((int(img.width * scale), working_h), Image.Resampling.LANCZOS)
     elif img.height < working_h:
+        _log_step(f"    Upscaling {img_path.name} ({img.height} -> {working_h}px)...")
         img = upscale_image(img, working_h)
     seg_input = adjust_exposure(img, EXPOSURE_GAMMA) if ENABLE_EXPOSURE_ADJUST else img
+    _log_step(f"    Segmenting {img_path.name} with {model_name}...")
     mask = generate_mask(seg_input, model_name, sessions)
     mask = mask.resize(img.size, Image.Resampling.LANCZOS)
     composite = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -609,9 +624,9 @@ def process_image(
     composite.putalpha(mask)
     if ENABLE_ALPHA_BOOST:
         composite = alpha_boost(composite)
-    scale = TARGET_HEIGHT / composite.height
+    scale = _EFFECTIVE_TARGET_HEIGHT / composite.height
     composite = composite.resize(
-        (int(composite.width * scale), TARGET_HEIGHT),
+        (int(composite.width * scale), _EFFECTIVE_TARGET_HEIGHT),
         Image.Resampling.LANCZOS,
     )
     if ENABLE_SMART_CROP:
@@ -623,6 +638,31 @@ def process_image(
         out_path = out_path.with_suffix(".png")
     composite.save(out_path)
     return out_path
+
+
+def _print_gpu_status() -> None:
+    """Print CUDA/GPU availability for Real-ESRGAN and rembg diagnostics."""
+    try:
+        import torch
+
+        cuda_ok = torch.cuda.is_available()
+        if cuda_ok:
+            dev = torch.cuda.get_device_name(0)
+            print(f"  CUDA: available ({dev})")
+        else:
+            print("  CUDA: not available - expect slow CPU processing")
+    except ImportError:
+        print("  CUDA: torch not loaded yet")
+    try:
+        import onnxruntime as ort
+
+        provs = ort.get_available_providers()
+        if "CUDAExecutionProvider" in provs:
+            print("  ONNX Runtime: CUDA provider available")
+        else:
+            print("  ONNX Runtime: CUDA provider not available - rembg will use CPU")
+    except ImportError:
+        print("  ONNX Runtime: not checked (rembg uses its own)")
 
 
 def main() -> None:
@@ -642,6 +682,9 @@ def main() -> None:
         print(f"No images found in {input_dir}. Add .png or .tiff files.")
         return
     print(f"Found {len(paths)} images. Loading models...")
+    if DRAFT_MODE:
+        print(f"  DRAFT_MODE: target={_EFFECTIVE_TARGET_HEIGHT}px, working={WORKING_HEIGHT}px")
+    _print_gpu_status()
     sessions: dict[str, Any] = {}
     for m in MODELS:
         if m == "sam2":
@@ -658,7 +701,10 @@ def main() -> None:
         else:
             from rembg import new_session
 
-            sessions[m] = new_session(m)
+            try:
+                sessions[m] = new_session(m, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+            except TypeError:
+                sessions[m] = new_session(m)
     for model_name in MODELS:
         if model_name == "sam2" and sessions.get("sam2_predictor") is None:
             continue
