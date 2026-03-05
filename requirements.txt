@@ -11,6 +11,7 @@ realesrgan>=0.3.0
 
 # Image processing
 scikit-image>=0.22.0
+tqdm>=4.65.0  # Progress bars
 opencv-contrib-python>=4.8.0  # xphoto GrayworldWB for de-grading
 numpy>=1.24.4
 Pillow>=9.4.0

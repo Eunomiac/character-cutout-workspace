@@ -36,6 +36,7 @@ except ImportError:
 
 import numpy as np
 from PIL import Image
+from tqdm import tqdm
 from PIL.Image import Image as PILImage
 
 # === CONFIGURATION (edit these) ===
@@ -662,8 +663,7 @@ def main() -> None:
         if model_name == "sam2" and sessions.get("sam2_predictor") is None:
             continue
         print(f"\nProcessing with {model_name}...")
-        for i, img_path in enumerate(paths):
-            print(f"  [{i+1}/{len(paths)}] {img_path.name}")
+        for img_path in tqdm(paths, desc=model_name, unit="img"):
             process_image(img_path, model_name, sessions, base_dir)
     if ENABLE_COLORIZATION or ENABLE_DE_GRADING:
         for model_name in MODELS:
@@ -673,8 +673,8 @@ def main() -> None:
             outputs = [p for p in out_dir.iterdir() if p.suffix.lower() in (".png", ".tiff", ".tif")]
             if outputs:
                 label = "Colorize + De-grade" if (ENABLE_COLORIZATION and ENABLE_DE_GRADING) else ("Colorize" if ENABLE_COLORIZATION else "De-grading")
-                print(f"  {label} {model_name} ({len(outputs)} images)...")
-                for out_path in outputs:
+                print(f"\n{label} {model_name}...")
+                for out_path in tqdm(outputs, desc=model_name, unit="img"):
                     try:
                         img = Image.open(out_path).convert("RGBA")
                         if ENABLE_COLORIZATION:
@@ -691,8 +691,8 @@ def main() -> None:
                 continue
             outputs = [p for p in out_dir.iterdir() if p.suffix.lower() in (".png", ".tiff", ".tif")]
             if outputs:
-                print(f"  Vampiric correction {model_name} ({len(outputs)} images)...")
-                for out_path in outputs:
+                print(f"\nVampiric correction {model_name}...")
+                for out_path in tqdm(outputs, desc=model_name, unit="img"):
                     img = Image.open(out_path).convert("RGBA")
                     if should_skip_vampiric(img, out_path.name):
                         continue
