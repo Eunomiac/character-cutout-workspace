@@ -49,8 +49,8 @@ INPUT_EXTENSIONS = (".png", ".tiff", ".tif")
 # Target height for all final cutouts (width scales proportionally)
 TARGET_HEIGHT = 3000
 
-# Draft mode: lower resolution for faster iteration (target 1000px, working 1500px)
-DRAFT_MODE = True
+# Draft mode: faster iteration; overrides resolution, model count, and other expensive options
+DRAFT_MODE = False
 
 # Upscale to 1.5x target height before cutout (gives model room for removal)
 UPSCALE_HEIGHT_FACTOR = 1.5  # working height = TARGET_HEIGHT * UPSCALE_HEIGHT_FACTOR
@@ -79,8 +79,24 @@ DE_GRADING_DARK_THRESHOLD = 60  # Mean luminance below this: apply exposure corr
 DE_GRADING_EXPOSURE_GAMMA = 0.75  # < 1 brightens; applied only when image is very dark
 
 # Optional colorization for near-grayscale images (Phase 0b)
-ENABLE_COLORIZATION = False
+ENABLE_COLORIZATION = True
 COLORIZATION_SATURATION_THRESHOLD = 0.05
+
+# Colorization backend: "hf_inference" | "hf_space" | "deoldify" | "none"
+COLORIZATION_BACKEND = "hf_space"
+
+# HF Inference: model ID for image_to_image. Required when backend is hf_inference.
+# Example: "rsortino/ColorizeNet" (SD-based). None = no default; set explicitly.
+COLORIZATION_HF_MODEL: Optional[str] = None
+
+# HF Space: "username/space-name" for Gradio-based colorization.
+COLORIZATION_HF_SPACE = "leonelhs/deoldify"
+
+# Max dimension for API calls (most models expect 512-1024). Images downscaled before send.
+COLORIZATION_MAX_SIZE = 1024
+
+# HF token. Uses HF_HUB_TOKEN env or huggingface-cli login if unset.
+COLORIZATION_HF_TOKEN: Optional[str] = None
 
 # Reference for vampiric skin look only (not used for clothing)
 VAMPIRIC_REFERENCE = "color-references/male-vampire-5.png"
@@ -102,9 +118,20 @@ CROP_PADDING = 5
 ENABLE_ALPHA_BOOST = True
 ALPHA_BOOST_PASSES = 4
 
-# Effective target and working height (draft mode overrides to 1000 / 1500)
+# Effective values when DRAFT_MODE overrides (faster iteration)
 _EFFECTIVE_TARGET_HEIGHT = 1000 if DRAFT_MODE else TARGET_HEIGHT
-WORKING_HEIGHT = int(_EFFECTIVE_TARGET_HEIGHT * UPSCALE_HEIGHT_FACTOR)
+_DRAFT_UPSCALE_FACTOR = 1.0  # No upscale in draft (skip Real-ESRGAN)
+_DRAFT_MODELS = ["birefnet-general"]  # Single fast model in draft
+_DRAFT_SAM2_SIZE = "tiny"
+WORKING_HEIGHT = int(
+    _EFFECTIVE_TARGET_HEIGHT * (_DRAFT_UPSCALE_FACTOR if DRAFT_MODE else UPSCALE_HEIGHT_FACTOR)
+)
+EFFECTIVE_MODELS = _DRAFT_MODELS if DRAFT_MODE else MODELS
+EFFECTIVE_SAM2_MODEL_SIZE = _DRAFT_SAM2_SIZE if DRAFT_MODE else SAM2_MODEL_SIZE
+EFFECTIVE_ALPHA_MATTING = False if DRAFT_MODE else ENABLE_ALPHA_MATTING
+EFFECTIVE_SKIN_DETECTION_MODE = "simple" if DRAFT_MODE else SKIN_DETECTION_MODE
+EFFECTIVE_COLORIZATION = False if DRAFT_MODE else ENABLE_COLORIZATION
+EFFECTIVE_ALPHA_BOOST_PASSES = 1 if DRAFT_MODE else ALPHA_BOOST_PASSES
 
 # Diagnostics: log which step each image is on (helps identify if stuck on upscale vs segment)
 ENABLE_STEP_LOGGING = True
@@ -155,6 +182,190 @@ def _get_mean_saturation_rgb(rgb: np.ndarray, alpha: Optional[np.ndarray] = None
 
 
 _colorizer_instance: Any = None
+_hf_inference_client: Any = None
+_gradio_space_client: Any = None
+
+
+def _resize_for_api(img: PILImage, max_size: int) -> tuple[PILImage, tuple[int, int]]:
+    """
+    Downscale image to fit within max_size (longest edge). Returns (resized_img, original_size).
+    """
+    w, h = img.size
+    orig_size = (w, h)
+    if max(h, w) <= max_size:
+        return img, orig_size
+    scale = max_size / max(h, w)
+    new_w = int(w * scale)
+    new_h = int(h * scale)
+    resized = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    return resized, orig_size
+
+
+def _colorize_via_inference_client(
+    img_rgb: PILImage,
+    alpha: Optional[np.ndarray],
+    orig_size: tuple[int, int],
+) -> tuple[PILImage, bool]:
+    """
+    Colorize via Hugging Face InferenceClient.image_to_image. Returns (result_rgba, success).
+    Requires COLORIZATION_HF_MODEL set to a diffusion/ControlNet colorization model (e.g. rsortino/ColorizeNet).
+    """
+    global _hf_inference_client
+    token = COLORIZATION_HF_TOKEN or os.environ.get("HF_TOKEN") or os.environ.get("HF_HUB_TOKEN")
+    if not token:
+        rgb_up = np.array(img_rgb.resize(orig_size, Image.Resampling.LANCZOS))
+        if alpha is not None:
+            a = alpha if alpha.ndim == 3 else alpha[:, :, np.newaxis]
+            result_arr = np.dstack([rgb_up, a])
+        else:
+            result_arr = rgb_up
+        return (Image.fromarray(result_arr.astype(np.uint8)), False)
+    if not COLORIZATION_HF_MODEL:
+        rgb_up = np.array(img_rgb.resize(orig_size, Image.Resampling.LANCZOS))
+        if alpha is not None:
+            a = alpha if alpha.ndim == 3 else alpha[:, :, np.newaxis]
+            result_arr = np.dstack([rgb_up, a])
+        else:
+            result_arr = rgb_up
+        return (Image.fromarray(result_arr.astype(np.uint8)), False)
+    try:
+        if _hf_inference_client is None:
+            from huggingface_hub import InferenceClient
+
+            _hf_inference_client = InferenceClient(token=token, timeout=90.0)
+        client = _hf_inference_client
+        result = client.image_to_image(
+            img_rgb,
+            prompt="colorize this black and white photo, natural realistic colors",
+            model=COLORIZATION_HF_MODEL,
+            negative_prompt="blurry, low resolution, bad quality, oversaturated",
+        )
+        if result is None:
+            raise ValueError("InferenceClient returned None")
+        result_pil = result if hasattr(result, "resize") else Image.open(result).convert("RGB")
+        result_arr = np.array(result_pil.resize(orig_size, Image.Resampling.LANCZOS))
+        if alpha is not None:
+            alpha_resized = (
+                np.array(Image.fromarray(alpha.squeeze()).resize(orig_size, Image.Resampling.LANCZOS))
+                if orig_size != (img_rgb.width, img_rgb.height)
+                else alpha
+            )
+            if alpha_resized.ndim == 2:
+                alpha_resized = alpha_resized[:, :, np.newaxis]
+            result_arr = np.dstack([result_arr, alpha_resized])
+        return (Image.fromarray(result_arr.astype(np.uint8)), True)
+    except Exception:
+        rgb_orig = np.array(img_rgb.resize(orig_size, Image.Resampling.LANCZOS))
+        if alpha is not None:
+            alpha_resized = (
+                np.array(Image.fromarray(alpha.squeeze()).resize(orig_size, Image.Resampling.LANCZOS))
+                if orig_size != (img_rgb.width, img_rgb.height)
+                else alpha
+            )
+            if alpha_resized.ndim == 2:
+                alpha_resized = alpha_resized[:, :, np.newaxis]
+            result_arr = np.dstack([rgb_orig, alpha_resized])
+        else:
+            result_arr = rgb_orig
+        return (Image.fromarray(result_arr.astype(np.uint8)), False)
+
+
+def _load_image_from_path_or_url(path_or_url: str) -> PILImage:
+    """
+    Load RGB image from local path or URL. Handles Gradio returning either.
+    """
+    s = str(path_or_url).strip()
+    if s.startswith(("http://", "https://")):
+        import urllib.request
+
+        fd, tmp = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        try:
+            urllib.request.urlretrieve(s, tmp)
+            return Image.open(tmp).convert("RGB")
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return Image.open(s).convert("RGB")
+
+
+def _colorize_via_gradio_space(
+    img_rgb: PILImage,
+    alpha: Optional[np.ndarray],
+    orig_size: tuple[int, int],
+) -> tuple[PILImage, bool]:
+    """
+    Colorize via Gradio Space (e.g. leonelhs/deoldify). Returns (result_rgba, success).
+    Verified: leonelhs/deoldify uses gr.Interface(predict, ...) with api_name="/predict".
+    Token optional for public Spaces.
+    """
+    global _gradio_space_client
+    token = COLORIZATION_HF_TOKEN or os.environ.get("HF_TOKEN") or os.environ.get("HF_HUB_TOKEN")
+    try:
+        if _gradio_space_client is None:
+            from gradio_client import Client  # pyright: ignore[reportMissingImports]
+
+            _gradio_space_client = Client(
+                COLORIZATION_HF_SPACE,
+                hf_token=token if token else None,
+            )
+        client = _gradio_space_client
+        fd, tmp_path_str = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        tmp_path = Path(tmp_path_str)
+        try:
+            img_rgb.save(tmp_path)
+            result = client.predict(str(tmp_path), api_name="/predict")
+            if result is None:
+                raise ValueError("Gradio Space returned None")
+            out_path = result if isinstance(result, (str, Path)) else result[0] if isinstance(result, (list, tuple)) else str(result)
+            result_pil = _load_image_from_path_or_url(str(out_path))
+            result_arr = np.array(result_pil.resize(orig_size, Image.Resampling.LANCZOS))
+            if alpha is not None:
+                alpha_resized = (
+                    np.array(Image.fromarray(alpha.squeeze()).resize(orig_size, Image.Resampling.LANCZOS))
+                    if orig_size != (img_rgb.width, img_rgb.height)
+                    else alpha
+                )
+                if alpha_resized.ndim == 2:
+                    alpha_resized = alpha_resized[:, :, np.newaxis]
+                result_arr = np.dstack([result_arr, alpha_resized])
+            return (Image.fromarray(result_arr.astype(np.uint8)), True)
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+    except Exception:
+        rgb_orig = np.array(img_rgb.resize(orig_size, Image.Resampling.LANCZOS))
+        if alpha is not None:
+            alpha_resized = (
+                np.array(Image.fromarray(alpha.squeeze()).resize(orig_size, Image.Resampling.LANCZOS))
+                if orig_size != (img_rgb.width, img_rgb.height)
+                else alpha
+            )
+            if alpha_resized.ndim == 2:
+                alpha_resized = alpha_resized[:, :, np.newaxis]
+            result_arr = np.dstack([rgb_orig, alpha_resized])
+        else:
+            result_arr = rgb_orig
+        return (Image.fromarray(result_arr.astype(np.uint8)), False)
+
+
+def _colorize_via_api(img_rgb: PILImage, alpha: Optional[np.ndarray]) -> tuple[PILImage, bool]:
+    """
+    Dispatch to HF Inference or HF Space backend. Downscales for API, upscales result.
+    Returns (colorized_rgba, success).
+    """
+    resized, orig_size = _resize_for_api(img_rgb, COLORIZATION_MAX_SIZE)
+    if COLORIZATION_BACKEND == "hf_inference":
+        return _colorize_via_inference_client(resized, alpha, orig_size)
+    if COLORIZATION_BACKEND == "hf_space":
+        return _colorize_via_gradio_space(resized, alpha, orig_size)
+    return (Image.fromarray(np.dstack([np.array(img_rgb), alpha]) if alpha is not None else img_rgb), False)
 
 
 def _get_colorizer() -> Any:
@@ -178,11 +389,13 @@ def _get_colorizer() -> Any:
 
 def colorize_if_needed(img: PILImage) -> PILImage:
     """
-    If image is nearly grayscale (mean saturation < threshold) and ENABLE_COLORIZATION,
-    run DeOldify to restore plausible color. Otherwise return unchanged.
-    Preserves alpha. Requires deoldify package (optional).
+    If image is nearly grayscale (mean saturation < threshold) and EFFECTIVE_COLORIZATION,
+    restore plausible color via configured backend (HF Inference, HF Space, or DeOldify).
+    Preserves alpha.
     """
-    if not ENABLE_COLORIZATION:
+    if not EFFECTIVE_COLORIZATION:
+        return img
+    if COLORIZATION_BACKEND == "none":
         return img
     arr = np.array(img)
     if arr.ndim != 3 or arr.shape[2] < 3:
@@ -192,30 +405,36 @@ def colorize_if_needed(img: PILImage) -> PILImage:
     mean_sat = _get_mean_saturation_rgb(rgb, alpha if alpha is not None else None)
     if mean_sat >= COLORIZATION_SATURATION_THRESHOLD:
         return img
-    colorizer = _get_colorizer()
-    if colorizer is None:
-        return img
-    fd, tmp_path_str = tempfile.mkstemp(suffix=".png")
-    os.close(fd)
-    tmp_path = Path(tmp_path_str)
-    try:
+    if COLORIZATION_BACKEND == "deoldify":
+        colorizer = _get_colorizer()
+        if colorizer is None:
+            return img
+        fd, tmp_path_str = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        tmp_path = Path(tmp_path_str)
+        try:
+            img_rgb = Image.fromarray(rgb)
+            img_rgb.save(tmp_path)
+            result = colorizer.get_transformed_image(
+                tmp_path, render_factor=35, post_process=True, watermarked=False
+            )
+            result_arr = np.array(result.convert("RGB"))
+            if alpha is not None:
+                result_arr = np.dstack([result_arr, alpha])
+            return Image.fromarray(result_arr)
+        except Exception:
+            return img
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+    if COLORIZATION_BACKEND in ("hf_inference", "hf_space"):
         img_rgb = Image.fromarray(rgb)
-        img_rgb.save(tmp_path)
-        result = colorizer.get_transformed_image(
-            tmp_path, render_factor=35, post_process=True, watermarked=False
-        )
-        result_arr = np.array(result.convert("RGB"))
-        if alpha is not None:
-            result_arr = np.dstack([result_arr, alpha])
-        return Image.fromarray(result_arr)
-    except Exception:
-        return img
-    finally:
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+        result, success = _colorize_via_api(img_rgb, alpha)
+        return result if success else img
+    return img
 
 
 def degrade_image(img: PILImage) -> PILImage:
@@ -300,7 +519,7 @@ def generate_mask(img: PILImage, model_name: str, sessions: dict[str, Any]) -> P
     result = remove(
         img,
         session=session,
-        alpha_matting=ENABLE_ALPHA_MATTING,
+        alpha_matting=EFFECTIVE_ALPHA_MATTING,
         alpha_matting_foreground_threshold=ALPHA_MATTING_FOREGROUND_THRESHOLD,
         alpha_matting_background_threshold=ALPHA_MATTING_BACKGROUND_THRESHOLD,
         alpha_matting_erode_structure_size=ALPHA_MATTING_ERODE_STRUCTURE_SIZE,
@@ -343,7 +562,7 @@ def alpha_boost(img: PILImage) -> PILImage:
         return img
     arr = np.array(img)
     alpha = arr[:, :, 3].astype(np.float64) / 255.0
-    alpha = 1.0 - (1.0 - alpha) ** ALPHA_BOOST_PASSES
+    alpha = 1.0 - (1.0 - alpha) ** EFFECTIVE_ALPHA_BOOST_PASSES
     arr[:, :, 3] = (np.clip(alpha, 0, 1) * 255).astype(np.uint8)
     return Image.fromarray(arr)
 
@@ -403,7 +622,7 @@ def _get_skin_coverage(img: PILImage) -> float:
     fg = alpha > 0.1
     if not np.any(fg):
         return 0.0
-    if SKIN_DETECTION_MODE == "precise":
+    if EFFECTIVE_SKIN_DETECTION_MODE == "precise":
         skin_mask = _get_skin_mask_precise(arr, img)
         skin = skin_mask > 32
     else:
@@ -546,7 +765,7 @@ def _get_skin_mask(rgb: np.ndarray, img: Optional[PILImage] = None) -> np.ndarra
     """
     Skin mask 0-255. precise=AI (human parsing); simple/extended=YCbCr.
     """
-    if SKIN_DETECTION_MODE == "precise":
+    if EFFECTIVE_SKIN_DETECTION_MODE == "precise":
         return _get_skin_mask_precise(rgb, img)
     r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
     y = 0.299 * r + 0.587 * g + 0.114 * b
@@ -671,7 +890,7 @@ def main() -> None:
     input_dir = base_dir / INPUT_FOLDER
     input_dir.mkdir(exist_ok=True)
     (base_dir / OUTPUT_BASE).mkdir(exist_ok=True)
-    for m in MODELS:
+    for m in EFFECTIVE_MODELS:
         (base_dir / OUTPUT_BASE / m).mkdir(exist_ok=True)
     paths = [
         p
@@ -683,16 +902,16 @@ def main() -> None:
         return
     print(f"Found {len(paths)} images. Loading models...")
     if DRAFT_MODE:
-        print(f"  DRAFT_MODE: target={_EFFECTIVE_TARGET_HEIGHT}px, working={WORKING_HEIGHT}px")
+        print(f"  DRAFT_MODE: target={_EFFECTIVE_TARGET_HEIGHT}px, working={WORKING_HEIGHT}px, models={EFFECTIVE_MODELS}")
     _print_gpu_status()
     sessions: dict[str, Any] = {}
-    for m in MODELS:
+    for m in EFFECTIVE_MODELS:
         if m == "sam2":
             try:
                 from sam2.sam2_image_predictor import SAM2ImagePredictor
 
-                hf_id = SAM2_HF_IDS.get(SAM2_MODEL_SIZE, SAM2_HF_IDS["large"])
-                print(f"  Loading SAM 2 ({SAM2_MODEL_SIZE})...")
+                hf_id = SAM2_HF_IDS.get(EFFECTIVE_SAM2_MODEL_SIZE, SAM2_HF_IDS["large"])
+                print(f"  Loading SAM 2 ({EFFECTIVE_SAM2_MODEL_SIZE})...")
                 predictor = SAM2ImagePredictor.from_pretrained(hf_id)
                 sessions["sam2_predictor"] = predictor
             except Exception as e:
@@ -705,25 +924,25 @@ def main() -> None:
                 sessions[m] = new_session(m, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
             except TypeError:
                 sessions[m] = new_session(m)
-    for model_name in MODELS:
+    for model_name in EFFECTIVE_MODELS:
         if model_name == "sam2" and sessions.get("sam2_predictor") is None:
             continue
         print(f"\nProcessing with {model_name}...")
         for img_path in tqdm(paths, desc=model_name, unit="img"):
             process_image(img_path, model_name, sessions, base_dir)
-    if ENABLE_COLORIZATION or ENABLE_DE_GRADING:
-        for model_name in MODELS:
+    if EFFECTIVE_COLORIZATION or ENABLE_DE_GRADING:
+        for model_name in EFFECTIVE_MODELS:
             out_dir = base_dir / OUTPUT_BASE / model_name
             if not out_dir.exists():
                 continue
             outputs = [p for p in out_dir.iterdir() if p.suffix.lower() in (".png", ".tiff", ".tif")]
             if outputs:
-                label = "Colorize + De-grade" if (ENABLE_COLORIZATION and ENABLE_DE_GRADING) else ("Colorize" if ENABLE_COLORIZATION else "De-grading")
+                label = "Colorize + De-grade" if (EFFECTIVE_COLORIZATION and ENABLE_DE_GRADING) else ("Colorize" if EFFECTIVE_COLORIZATION else "De-grading")
                 print(f"\n{label} {model_name}...")
                 for out_path in tqdm(outputs, desc=model_name, unit="img"):
                     try:
                         img = Image.open(out_path).convert("RGBA")
-                        if ENABLE_COLORIZATION:
+                        if EFFECTIVE_COLORIZATION:
                             img = colorize_if_needed(img)
                         if ENABLE_DE_GRADING:
                             img = degrade_image(img)
@@ -731,7 +950,7 @@ def main() -> None:
                     except Exception as e:
                         print(f"    Failed {out_path.name}: {e}")
     if ENABLE_VAMPIRIC_CORRECTION:
-        for model_name in MODELS:
+        for model_name in EFFECTIVE_MODELS:
             out_dir = base_dir / OUTPUT_BASE / model_name
             if not out_dir.exists():
                 continue
