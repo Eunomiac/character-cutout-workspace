@@ -21,6 +21,17 @@ _MODEL_CACHE.mkdir(exist_ok=True)
 (_MODEL_CACHE / "huggingface").mkdir(exist_ok=True)
 os.environ.setdefault("U2NET_HOME", str(_MODEL_CACHE / "rembg"))
 os.environ.setdefault("HF_HOME", str(_MODEL_CACHE / "huggingface"))
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+# Compatibility: torchvision 0.17+ removed functional_tensor; basicsr still imports it
+import sys
+try:
+    import torchvision.transforms.functional as _tv_f
+    _ft = type(sys)("torchvision.transforms.functional_tensor")
+    _ft.rgb_to_grayscale = _tv_f.rgb_to_grayscale
+    sys.modules["torchvision.transforms.functional_tensor"] = _ft
+except ImportError:
+    pass
 
 import numpy as np
 from PIL import Image
