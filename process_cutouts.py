@@ -9,8 +9,18 @@ Run from project root: python process_cutouts.py
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Optional
+
+# Route model caches to workspace (saves SSD space; allows HDD storage)
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_MODEL_CACHE = _SCRIPT_DIR / "model-cache"
+_MODEL_CACHE.mkdir(exist_ok=True)
+(_MODEL_CACHE / "rembg").mkdir(exist_ok=True)
+(_MODEL_CACHE / "huggingface").mkdir(exist_ok=True)
+os.environ.setdefault("U2NET_HOME", str(_MODEL_CACHE / "rembg"))
+os.environ.setdefault("HF_HOME", str(_MODEL_CACHE / "huggingface"))
 
 import numpy as np
 from PIL import Image
@@ -108,7 +118,7 @@ def upscale_image(img: PILImage, target_height: int) -> PILImage:
     from realesrgan import RealESRGANer
 
     model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
-    weights_dir = Path(__file__).resolve().parent / "weights"
+    weights_dir = _MODEL_CACHE / "real-esrgan"
     weights_dir.mkdir(exist_ok=True)
     model_path = weights_dir / "RealESRGAN_x4plus.pth"
     if not model_path.exists():

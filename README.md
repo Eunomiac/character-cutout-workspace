@@ -41,7 +41,7 @@ A command-line Python workflow for producing **Vampire: the Masquerade** NPC cha
    pip install -r requirements.txt
    ```
 
-   On first run, rembg, SAM 2, and Real-ESRGAN will download their model weights (~500MB+ total).
+   On first run, rembg, SAM 2, and Real-ESRGAN will download their model weights (~2.5GB total) into `model-cache/`. This keeps everything in the workspace—handy for storing on an HDD to save SSD space.
 
 ## Project Structure
 
@@ -53,9 +53,9 @@ A command-line Python workflow for producing **Vampire: the Masquerade** NPC cha
 │   ├── bria-rmbg/
 │   └── sam2/
 ├── color-references/       # Optional: reference image(s) for color matching
+├── model-cache/            # Auto-created: all model weights (rembg, SAM 2, Real-ESRGAN)
 ├── process_cutouts.py      # Main script
 ├── requirements.txt
-└── weights/                # Auto-created: Real-ESRGAN model weights
 ```
 
 ## Usage

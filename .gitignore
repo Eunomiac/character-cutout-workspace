@@ -3,7 +3,8 @@
 venv/
 env/
 
-# Downloaded model weights
+# Downloaded model weights (stored in model-cache/ for HDD/portable use)
+model-cache/
 weights/
 *.pth
 *.pt
