@@ -11,9 +11,16 @@ realesrgan>=0.3.0
 
 # Image processing
 scikit-image>=0.22.0
+opencv-contrib-python>=4.8.0  # xphoto GrayworldWB for de-grading
 numpy>=1.24.4
 Pillow>=9.4.0
 
 # SAM 2 - install from GitHub (requires torch>=2.5.1, huggingface_hub for model download)
 huggingface_hub>=0.20.0
 SAM-2 @ git+https://github.com/facebookresearch/sam2.git
+
+# Optional: AI colorization for near-grayscale images (Phase 0b). Heavy deps; install separately if needed.
+# pip install deoldify  # Requires fastai; see DeOldify repo for full deps
+
+# AI skin detection Phase 2: human parsing for full-body skin (face, arms, hands, etc.)
+transformers>=4.30.0

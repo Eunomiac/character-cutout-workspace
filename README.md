@@ -1,6 +1,6 @@
 # Character Cutout Workspace
 
-A command-line Python workflow for producing **Vampire: the Masquerade** NPC character cutouts: background removal, vampiric skin correction (paler, cooler tones), and batch color matching for a consistent look across all cutouts.
+A command-line Python workflow for producing **Vampire: the Masquerade** NPC character cutouts: background removal, de-grading (undo color grading), and vampiric skin correction toward a reference look.
 
 ## Features
 
@@ -11,8 +11,9 @@ A command-line Python workflow for producing **Vampire: the Masquerade** NPC cha
 - **Alpha matting** — Refined edges for hair and fine detail
 - **Alpha boost** — Fixes semi-transparent “see-through” patches
 - **Smart crop** — Trims ghost particles at edges, re-scales to target height
-- **Batch color matching** — LAB-based normalization so outputs share a consistent look
-- **Vampiric skin correction** — Skin-only paler/cooler adjustment; skipped for inhuman/masked characters
+- **De-grading** — Neutralize color grading (sepia, blue cast) via white balance; clothing left neutrally lit
+- **Optional colorization** — DeOldify for near-grayscale images (when enabled)
+- **Vampiric skin correction** — Skin-only adjustment toward reference look; reference influences skin only, not clothing
 
 ## Requirements
 
@@ -126,21 +127,36 @@ Edit the config block at the top of `process_cutouts.py`:
 | `CROP_ALPHA_THRESHOLD` | `0.4` | Pixels with alpha ≥ this count as content |
 | `CROP_PADDING` | `5` | Extra pixels around crop |
 
-### Batch Color Matching
+### De-Grading
 
 | Parameter | Default | Description |
 | ----------- | ----------- | ----------- |
-| `ENABLE_COLOR_MATCHING` | `True` | Normalize brightness/color across outputs |
-| `COLOR_MATCH_REFERENCE` | `"color-references/male-vampire-5.png"` | Path to reference image, or `"first"` to use first processed image |
+| `ENABLE_DE_GRADING` | `True` | Neutralize color grading (sepia, blue cast) via white balance |
+| `DE_GRADING_DARK_THRESHOLD` | `60` | Mean luminance below this: apply exposure correction |
+| `DE_GRADING_EXPOSURE_GAMMA` | `0.75` | Gamma for very dark images (&lt; 1 brightens) |
+
+### Optional Colorization
+
+| Parameter | Default | Description |
+| ----------- | ----------- | ----------- |
+| `ENABLE_COLORIZATION` | `False` | AI colorize near-grayscale images (requires DeOldify) |
+| `COLORIZATION_SATURATION_THRESHOLD` | `0.05` | Mean saturation below this triggers colorization |
+
+### Skin Detection
+
+| Parameter | Default | Description |
+| ----------- | ----------- | ----------- |
+| `SKIN_DETECTION_MODE` | `"precise"` | `"precise"` \| `"simple"` — AI human parsing (recommended) or YCbCr fallback |
 
 ### Vampiric Skin Correction
 
 | Parameter | Default | Description |
 | ----------- | ----------- | ----------- |
-| `ENABLE_VAMPIRIC_CORRECTION` | `True` | Apply paler, cooler skin tone (skin only) |
-| `VAMPIRIC_PALENESS` | `0.85` | 1.0 = no change; &lt; 1 = paler |
-| `VAMPIRIC_COOL_SHIFT` | `0.08` | Hue shift toward blue (0 = none) |
-| `VAMPIRIC_SATURATION` | `0.9` | Slight desaturation on skin (1.0 = no change) |
+| `ENABLE_VAMPIRIC_CORRECTION` | `True` | Apply skin-only adjustment toward reference |
+| `VAMPIRIC_REFERENCE` | `"color-references/male-vampire-5.png"` | Reference for target skin look (skin only; clothing unchanged) |
+| `VAMPIRIC_PALENESS` | `0.85` | Fallback when no reference: paleness (1.0 = no change) |
+| `VAMPIRIC_COOL_SHIFT` | `0.08` | Fallback: hue shift toward blue |
+| `VAMPIRIC_SATURATION` | `0.9` | Fallback: slight desaturation |
 
 ### Inhuman / Monster / Masked
 
@@ -152,8 +168,8 @@ Edit the config block at the top of `process_cutouts.py`:
 
 ## Color Reference Tips
 
-- **Choose a neutral reference** — Avoid strong makeup (e.g. dark lipstick) so it doesn’t affect all characters.
-- **Format** — PNG or high-quality JPG; LAB matching uses color statistics, not texture or style.
+- **Reference influences skin only** — `VAMPIRIC_REFERENCE` defines the target vampiric skin look. Clothing stays neutrally lit (e.g. dark lipstick) so it doesn’t affect all characters.
+- **Format** — PNG or high-quality JPG; LAB matching uses skin-region color statistics.
 
 ## License
 
